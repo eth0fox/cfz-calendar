@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en-gb">
+    <script>
+
+        const EVENT_ID = 'cfz26';
+        const EVENT_NAME = 'Confuzzled 2026';
+        async function generateCalendar() {
+            const button = document.querySelector("button");
+            button.disabled = true;
+            try {
+                let request = await fetch("https://events.confuzzled.org.uk/" + EVENT_ID + "/schedule/v/v6.2.2/widgets/schedule.json");
+                if (!request.ok) throw new Error("Failed to fetch calendar data: " + request.status  + " " + request.statusText);
+                /** @type {EventsResponse} */
+                let data = await request.json();
+
+                /** @type {Room[]} */
+                let rooms = [];
+                for (let r of data.rooms) rooms[r.id] = r;
+
+                /** @type {Record<string, Speaker>} */
+                let speakers = {};
+                for (let s of data.speakers) speakers[s.code] = s;
+                
+
+                let ics = "";
+                /**  @param {string} line */
+                function addIcsLine(line) {
+                    ics += line.replace(/\n/g,'\\n') + "\r\n";
+                }
+                function addIcsKV(key, value) {
+                    addIcsLine(key + ":" + value);
+                }
+                function addIcsDate(key, value) {
+                    // sometimes the incoming date is in local time, which isn't permitted by ICS so we force it to UTC
+
+                    if (!value) throw new Error("Missing date");
+                    let date = new Date(value);
+                    if (isNaN(date)) throw new Error("Invalid date: " + value);
+                    let icsDate = date.toISOString()
+                        .replace(/\.\d+/,"") // remove millis
+                        .replace(/[-:]/g,"") // remove seperator characters
+                    if (!icsDate.endsWith("Z") || icsDate.length !== 16) throw new Error("Date formatting went wrong, got " + icsDate);
+                    addIcsKV(key, icsDate)
+                }
+                // CALENDAR ITSSELF
+                addIcsKV("BEGIN","VCALENDAR");
+                addIcsKV("VERSION","2.0");
+                addIcsKV("PRODID","-//eth0fox//NONSGML cfz-calendar//EN");
+                addIcsKV("X-WR-CALNAME", EVENT_NAME);
+                addIcsKV("X-WR-CALDESC", EVENT_NAME + " schedule generated at " + new Date().toLocaleString());
+                let latestModifiedEvent = 0;
+                for (let event of data.talks) {
+                    addIcsKV("BEGIN","VEVENT");
+                    addIcsKV("UID", EVENT_ID + "-" + event.id + "@events.confuzzled.org.uk"); // unique event id
+                    addIcsKV("URL", "https://events.confuzzled.org.uk/" + EVENT_ID + "/talk/" + event.code);
+                    addIcsDate("DTSTART", event.start); // event start time
+                    addIcsDate("DTEND", event.end); // event start time
+                    var lmdate = new Date(event.updated);
+                    addIcsDate("LAST-MODIFIED", lmdate);
+                    if (lmdate > latestModifiedEvent) latestModifiedEvent = lmdate;
+                    addIcsKV("SUMMARY", event.title + (event.do_not_record ? "📵" : ""));
+                    let room = rooms[event.room];
+                    for (let lang in room.name) {
+                        let name = room.name[lang];
+                        let desc = room.description[lang];
+                        if (desc) name = name + " (" + desc + ")";
+                        addIcsKV("LOCATION;LANGUAGE=" + lang, name);
+                    }
+
+                    for (let speakerCode of event.speakers) {
+                        let spk = speakers[speakerCode];
+                        addIcsKV("ATTENDEE;ROLE=REQ-PARTICIPANT;PARTYSTAT=ACCCEPTED;CN=" + spk.name.replace(/[^a-zA-Z0-9- _]/g, ''), speakerCode + "@cfz-speaker.invalid");
+                    }
+
+                    addIcsKV("END","VEVENT");
+                }
+                addIcsKV("END","VCALENDAR")
+
+                var blob = new Blob([ics], { type: 'text/calendar' });
+                var url = URL.createObjectURL(blob);
+                var a = document.createElement('a');
+                a.download = EVENT_NAME;
+                a.href = url;
+                a.click();
+                document.getElementById('output').innerHTML = "<a href='" + url + "''>Download</a>. Latest modified event " + latestModifiedEvent;
+                console.log(data);
+            } catch(error) {
+                alert("Oh noes, something went wrong!\n\n" + error);
+            } finally {
+                button.disabled = undefined;
+            }
+
+
+        }
+    </script>
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>CFZ Schedule</title>
+    </head>
+    <body>
+        <h1>Confuzzled 2026 Schedule</h1>
+        <p>This is a website that takes the live calendar data from the Confuzzled website and converts it into a format that can be easily imported into calendar applications.</p>
+        <br/>
+        <i>This site was not made or approved by Confuzzled - please double check everything imports accurately!</i>
+        <br/>
+        <button onclick="generateCalendar()">Generate calendar</button>
+        <div id="output"></div>
+
+        <i>This site is a single HTML file. CTRL+S it for keepsies.</i>
+    </body>
+
+    <script>
+        /**
+         * @typedef EventsResponse
+         * @type {object}
+         * @property {Talk[]} talks
+         * @property {string} version
+         * @property {number} schedule_id
+         * @property {string} timezone
+         * @property {Date} event_start
+         * @property {Date} event_end
+         * @property {Room[]} rooms
+         * @property {Speaker[]} speakers
+         */
+        /**
+         * @typedef LocalisedString
+         * @type {object}
+         * @property {string} en
+         */
+        /**
+         * @typedef Room
+         * @type {object}
+         * @property {number} id
+         * @property {LocalisedString} name
+         * @property {LocalisedString} description
+         */
+        /**
+         * @typedef Speaker
+         * @type {object}
+         * @property {string} code
+         * @property {string} name
+         * @property {string} avatar
+         * @property {string} avatar_thumbnail_default
+         * @property {string} avatar_thumbnail_tiny
+         */
+        /**
+         * @typedef Talk
+         * @type {object}
+         * @property {string} code
+         * @property {number} id
+         * @property {string} title
+         * @property {string[]} speakers
+         * @property {Date} start
+         * @property {Date} end
+         * @property {number} room
+         * @property {number} duration
+         * @property {Date} updated
+         * @property {"en" | "en-gb"} content_locale
+         * @property {boolean} do_not_record
+         */
+    </script>
+</html>
