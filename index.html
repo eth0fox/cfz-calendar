@@ -2,16 +2,39 @@
 <html lang="en-gb">
     <script>
 
-        const EVENT_ID = 'cfz26';
-        const EVENT_NAME = 'Confuzzled 2026';
+        const currentYear = new Date().getFullYear();
+        const currentYear2 = currentYear.toString().slice(-2);
+
+
+        const EVENTS = {
+            'events.confuzzled.org.uk': {
+                name: 'Confuzzled ' + currentYear,
+                apiUrl: `https://events.confuzzled.org.uk/cfz${currentYear2}/schedule/v/v6.2.2/widgets/schedule.json`,
+                webUrl: ({code}) => `https://events.confuzzled.org.uk/cfz${currentYear2}/talk/${code}`
+            },
+            'cfp.eurofurence.org': {
+                name: 'Eurofurence ' + (currentYear-1996) ,
+                apiUrl: `https://cfp.eurofurence.org/ef-schedule-${currentYear}/api/schedule`,
+                webUrl: ({stable_id}) => `https://cfp.eurofurence.org/ef-schedule-${currentYear}/?event=${encodeURIComponent(stable_id)}`,
+                cantFetch: true,
+            }
+        };
+        
         async function generateCalendar() {
+            const evtKey = document.getElementById("conSelector").value;
+            const evtDef = EVENTS[evtKey];
             const button = document.querySelector("button");
             button.disabled = true;
             try {
-                let request = await fetch("https://events.confuzzled.org.uk/" + EVENT_ID + "/schedule/v/v6.2.2/widgets/schedule.json");
-                if (!request.ok) throw new Error("Failed to fetch calendar data: " + request.status  + " " + request.statusText);
                 /** @type {EventsResponse} */
-                let data = await request.json();
+                let data;
+                if (!evtDef.cantFetch) {
+                    let request = await fetch(evtDef.apiUrl);
+                    if (!request.ok) throw new Error("Failed to fetch calendar data: " + request.status  + " " + request.statusText);
+                    data = await request.json();
+                } else {
+                    data = JSON.parse(document.getElementById('manualJson').value);
+                }
 
                 /** @type {Room[]} */
                 let rooms = [];
@@ -25,7 +48,7 @@
                 let ics = "";
                 /**  @param {string} line */
                 function addIcsLine(line) {
-                    ics += line.replace(/\n/g,'\\n') + "\r\n";
+                    ics += line.replace(/\r?\n/g,'\\n') + "\r\n";
                 }
                 function addIcsKV(key, value) {
                     addIcsLine(key + ":" + value);
@@ -42,34 +65,50 @@
                     if (!icsDate.endsWith("Z") || icsDate.length !== 16) throw new Error("Date formatting went wrong, got " + icsDate);
                     addIcsKV(key, icsDate)
                 }
+                let evtName = data.event.name ?? evtDef.name;
                 // CALENDAR ITSSELF
                 addIcsKV("BEGIN","VCALENDAR");
                 addIcsKV("VERSION","2.0");
                 addIcsKV("PRODID","-//eth0fox//NONSGML cfz-calendar//EN");
-                addIcsKV("X-WR-CALNAME", EVENT_NAME);
-                addIcsKV("X-WR-CALDESC", EVENT_NAME + " schedule generated at " + new Date().toLocaleString());
+                addIcsKV("X-WR-CALNAME", evtName);
+                addIcsKV("X-WR-CALDESC", evtName + " schedule generated at " + new Date().toLocaleString());
                 let latestModifiedEvent = 0;
-                for (let event of data.talks) {
+
+                let events = data.talks;
+                if (!events) events = data.days.filter(a => a.date !== "unscheduled").map(a => a.slots).flat(); 
+
+                for (let event of events) {
+                    if (!event.start || !event.end) {
+                        console.warn("Event has no start or end date, what?: ", event);
+                        continue;
+                    }
                     addIcsKV("BEGIN","VEVENT");
-                    addIcsKV("UID", EVENT_ID + "-" + event.id + "@events.confuzzled.org.uk"); // unique event id
-                    addIcsKV("URL", "https://events.confuzzled.org.uk/" + EVENT_ID + "/talk/" + event.code);
+                    addIcsKV("UID", event.id + "@" + evtKey); // unique event id
+                    addIcsKV("URL", evtDef.webUrl(event));
+                    if (event.raw_description) addIcsKV("DESCRIPTION", event.raw_description);
                     addIcsDate("DTSTART", event.start); // event start time
                     addIcsDate("DTEND", event.end); // event start time
                     var lmdate = new Date(event.updated);
-                    addIcsDate("LAST-MODIFIED", lmdate);
-                    if (lmdate > latestModifiedEvent) latestModifiedEvent = lmdate;
-                    addIcsKV("SUMMARY", event.title + (event.do_not_record ? "📵" : ""));
-                    let room = rooms[event.room];
-                    for (let lang in room.name) {
-                        let name = room.name[lang];
-                        let desc = room.description[lang];
+                    if (!isNaN(lmdate)) {
+                        addIcsDate("LAST-MODIFIED", lmdate);
+                        if (lmdate > latestModifiedEvent) latestModifiedEvent = lmdate;
+                    }
+                    let summary = event.title;
+                    if (event.track?.name) summary = event.track.name + ": " + summary;
+                    if (event.do_not_record) summary += "📵"
+                    addIcsKV("SUMMARY", summary);
+                    let room = rooms[typeof event.room == 'object' ? event.room.id : event.room];
+                    for (let lang in typeof room.name == 'object' ? room.name : {"en": 1}) {
+                        let name = typeof room.name == 'object' ? room.name[lang] : room.name; 
+                        let desc = typeof room.description == 'object' ? room.description?.[lang] : room.description;
                         if (desc) name = name + " (" + desc + ")";
                         addIcsKV("LOCATION;LANGUAGE=" + lang, name);
                     }
 
-                    for (let speakerCode of event.speakers) {
-                        let spk = speakers[speakerCode];
-                        addIcsKV("ATTENDEE;ROLE=REQ-PARTICIPANT;PARTYSTAT=ACCCEPTED;CN=" + spk.name.replace(/[^a-zA-Z0-9- _]/g, ''), speakerCode + "@cfz-speaker.invalid");
+                    for (let _spk of event.speakers) {
+                        let spk = typeof _spk == 'object' ? _spk : speakers[_spk];
+                        let speakerCode = typeof _spk == 'object' ? _spk.code : _spk;
+                        addIcsKV("ATTENDEE;ROLE=REQ-PARTICIPANT;PARTYSTAT=ACCCEPTED;CN=" + spk.name.replace(/[^a-zA-Z0-9- _]/g, ''), speakerCode + "@con-speaker.invalid");
                     }
 
                     addIcsKV("END","VEVENT");
@@ -79,12 +118,13 @@
                 var blob = new Blob([ics], { type: 'text/calendar' });
                 var url = URL.createObjectURL(blob);
                 var a = document.createElement('a');
-                a.download = EVENT_NAME;
+                a.download = evtDef.name;
                 a.href = url;
                 a.click();
                 document.getElementById('output').innerHTML = "<a href='" + url + "''>Download</a>. Latest modified event " + latestModifiedEvent;
                 console.log(data);
             } catch(error) {
+                console.error(error);
                 alert("Oh noes, something went wrong!\n\n" + error);
             } finally {
                 button.disabled = undefined;
@@ -92,18 +132,51 @@
 
 
         }
+        
+        function onChange() {
+            let selectedId = document.getElementById("conSelector").value;
+            let sDef = EVENTS[selectedId];
+            let link = document.getElementById("fetchLink");
+            link.innerText = link.href = sDef.apiUrl;
+            document.getElementById("cantFetch").style.display = sDef.cantFetch ? "" : "none";
+        }
+
+        function onLoad() {
+            console.log("Loaded!");
+            const conSelector = document.getElementById("conSelector");
+            for (let k in EVENTS) {
+                let opt = document.createElement('option');
+                opt.value = k;
+                opt.innerText = EVENTS[k].name;
+                conSelector.appendChild(opt);
+                
+            }
+            conSelector.value = Object.keys(EVENTS)[0];
+            onChange();
+        }
+        if (document.readyState !== 'loading') onLoad();
+        document.addEventListener('DOMContentLoaded', onLoad);
     </script>
     <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>CFZ Schedule</title>
+        <title>Furcon Schedule</title>
     </head>
     <body>
-        <h1>Confuzzled 2026 Schedule</h1>
-        <p>This is a website that takes the live calendar data from the Confuzzled website and converts it into a format that can be easily imported into calendar applications.</p>
+        <h1><select id="conSelector" oninput="onChange()" onchange="onChange()" style="font-size: inherit;"></select> Schedule</h1>
+        <p>This is a website that takes the live calendar data from the website and converts it into a format that can be easily imported into calendar applications.</p>
         <br/>
-        <i>This site was not made or approved by Confuzzled - please double check everything imports accurately!</i>
+        <i>This site was not made or approved by the convention organizers - please double check everything imports accurately!</i>
         <br/>
+        <div id="cantFetch">
+            Unfortunately - for this con I can't directly fetch the calendar, you'll need to:
+            <ol>
+                <li>Open this link in a new tab: <a id="fetchLink" target="_blank"></a></li>
+                <li>Copy all the content (if you're in Firefox, use the 'copy' button in the top left, otherwise just select all and copy & paste)</li>
+                <li>Paste it in here</li>
+            </ol>
+            <textarea id="manualJson" placeholder='{"days":[...'></textarea>
+        </div>
         <button onclick="generateCalendar()">Generate calendar</button>
         <div id="output"></div>
 
